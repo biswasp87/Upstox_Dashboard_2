@@ -123,7 +123,7 @@ def get_underlying_instrument_key(symbol):
     return None
 
 # API functions
-def fetch_historical_v3(instrument_key, interval='day', interval_value=1, from_date=None, to_date=None):
+def fetch_historical_v3(instrument_key, interval='days', interval_value=1, from_date=None, to_date=None):
     """Fetch Historical Candle Data V3."""
     if to_date is None:
         to_date = datetime.now().strftime('%Y-%m-%d')
@@ -151,7 +151,7 @@ def fetch_historical_v3(instrument_key, interval='day', interval_value=1, from_d
 
 def fetch_option_chain(underlying_key, expiry):
     """Fetch Option Chain from Upstox API."""
-    url = f"https://api.upstox.com/v2/market-quote/option/chain?instrument_key={underlying_key}&expiry_date={expiry}"
+    url = f"https://api.upstox.com/v2/option/chain?instrument_key={underlying_key}&expiry_date={expiry}"
     headers = {
         'Accept': 'application/json',
         'Authorization': f'Bearer {get_access_token()}'
@@ -301,11 +301,7 @@ def update_symbol_data(symbol):
     # We need underlying price to find ATM
     underlying_price = 0
     if chain_data:
-        underlying_price = chain_data[0].get('underlying_key', {}).get('ltp', 0)
-        # Wait, the structure might be different. Let's check Upstox docs or assume common structure.
-        # Usually it's in each item or a separate field.
-        # Actually in Upstox v2 option chain, it might be in 'underlying_price'
-        underlying_price = chain_data[0].get('underlying_price', 0)
+        underlying_price = chain_data[0].get('underlying_spot_price', 0)
 
     atm_strike = min(strikes, key=lambda x: abs(x - underlying_price)) if strikes else None
 
