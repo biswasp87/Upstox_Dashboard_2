@@ -427,8 +427,8 @@ def update_iv_graph(chain_data, underlying_info):
         if strike < underlying_price * 0.8 or strike > underlying_price * 1.2:
             continue
 
-        call_iv = item.get('call_options', {}).get('market_data', {}).get('iv', 0)
-        put_iv = item.get('put_options', {}).get('market_data', {}).get('iv', 0)
+        call_iv = item.get('call_options', {}).get('option_greeks', {}).get('iv', 0)
+        put_iv = item.get('put_options', {}).get('option_greeks', {}).get('iv', 0)
 
         iv_data.append({
             'strike': strike,
