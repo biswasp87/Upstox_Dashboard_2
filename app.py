@@ -83,7 +83,7 @@ def fetch_and_prepare_data():
         if not isinstance(s, str): return ""
         import re
         s = s.upper()
-        s = re.sub(r'[^A-Z0-0\s]', '', s) # Remove punctuation
+        s = re.sub(r'[^A-Z0-9\s]', '', s) # Remove punctuation
         s = re.sub(r'\s+', ' ', s).strip()
         return s
 
@@ -123,7 +123,7 @@ def get_underlying_instrument_key(symbol):
     return None
 
 # API functions
-def fetch_historical_v3(instrument_key, interval='days', interval_value=1, from_date=None, to_date=None):
+def fetch_historical_v3(instrument_key, interval='day', interval_value=1, from_date=None, to_date=None):
     """Fetch Historical Candle Data V3."""
     if to_date is None:
         to_date = datetime.now().strftime('%Y-%m-%d')
@@ -586,15 +586,30 @@ def update_table(chain_data):
     rows = []
     for item in chain_data:
         strike = item['strike_price']
-        ce = item.get('call_options', {}).get('market_data', {})
-        pe = item.get('put_options', {}).get('market_data', {})
+        ce_md = item.get('call_options', {}).get('market_data', {})
+        ce_g = item.get('call_options', {}).get('option_greeks', {})
+        pe_md = item.get('put_options', {}).get('market_data', {})
+        pe_g = item.get('put_options', {}).get('option_greeks', {})
+
+        def calc_oi_chg_pct(md):
+            oi = md.get('oi', 0)
+            prev_oi = md.get('prev_oi', 0)
+            if prev_oi and prev_oi != 0:
+                return round(((oi - prev_oi) / prev_oi) * 100, 2)
+            return 0
 
         rows.append({
-            'CE_OI': ce.get('oi'),
-            'CE_LTP': ce.get('ltp'),
+            'CE_OI': ce_md.get('oi'),
+            'CE_OI_Chg%': calc_oi_chg_pct(ce_md),
+            'CE_Delta': ce_g.get('delta'),
+            'CE_POP': ce_g.get('pop'),
+            'CE_LTP': ce_md.get('ltp'),
             'Strike': strike,
-            'PE_LTP': pe.get('ltp'),
-            'PE_OI': pe.get('oi')
+            'PE_LTP': pe_md.get('ltp'),
+            'PE_POP': pe_g.get('pop'),
+            'PE_Delta': pe_g.get('delta'),
+            'PE_OI_Chg%': calc_oi_chg_pct(pe_md),
+            'PE_OI': pe_md.get('oi')
         })
 
     df = pd.DataFrame(rows).sort_values('Strike')
@@ -604,6 +619,36 @@ def update_table(chain_data):
         columns=[{'name': i, 'id': i} for i in df.columns],
         style_cell={'textAlign': 'center'},
         style_header={'fontWeight': 'bold', 'backgroundColor': 'lightgrey'},
+        style_data_conditional=[
+            {
+                'if': {
+                    'filter_query': '{CE_OI_Chg%} > 0',
+                    'column_id': 'CE_OI_Chg%'
+                },
+                'color': 'green'
+            },
+            {
+                'if': {
+                    'filter_query': '{CE_OI_Chg%} < 0',
+                    'column_id': 'CE_OI_Chg%'
+                },
+                'color': 'red'
+            },
+            {
+                'if': {
+                    'filter_query': '{PE_OI_Chg%} > 0',
+                    'column_id': 'PE_OI_Chg%'
+                },
+                'color': 'green'
+            },
+            {
+                'if': {
+                    'filter_query': '{PE_OI_Chg%} < 0',
+                    'column_id': 'PE_OI_Chg%'
+                },
+                'color': 'red'
+            }
+        ],
         page_size=20
     )
 
