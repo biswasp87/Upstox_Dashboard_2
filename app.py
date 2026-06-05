@@ -74,8 +74,8 @@ def fetch_and_prepare_data():
     if upstox_df.empty:
         return pd.DataFrame()
 
-    # 3. Filter OPTSTK
-    optstk_df = upstox_df[upstox_df['instrument_type'] == 'OPTSTK'].copy()
+    # 3. Filter OPTSTK and FUTSTK
+    instruments_filtered = upstox_df[upstox_df['instrument_type'].isin(['OPTSTK', 'FUTSTK'])].copy()
 
     # 4. Merge
     # Normalize names for matching: remove non-alphanumeric and extra spaces
@@ -87,11 +87,11 @@ def fetch_and_prepare_data():
         s = re.sub(r'\s+', ' ', s).strip()
         return s
 
-    optstk_df['name_clean'] = optstk_df['name'].apply(clean_name)
+    instruments_filtered['name_clean'] = instruments_filtered['name'].apply(clean_name)
     nifty500_df['company_name_clean'] = nifty500_df['Company Name'].apply(clean_name)
 
-    # Merge Symbol from NIFTY 500 into OPTSTK
-    merged_df = optstk_df.merge(
+    # Merge Symbol from NIFTY 500 into filtered instruments
+    merged_df = instruments_filtered.merge(
         nifty500_df[['company_name_clean', 'Symbol']],
         left_on='name_clean',
         right_on='company_name_clean',
@@ -104,8 +104,8 @@ def fetch_and_prepare_data():
     return merged_df
 
 # Helper functions
-def get_underlying_instrument_key(symbol):
-    """Find the NSE_EQ instrument key for a symbol."""
+def get_underlying_instrument_info(symbol):
+    """Find the NSE_EQ instrument info for a symbol."""
     try:
         upstox_df = get_all_instruments()
         if upstox_df.empty:
@@ -117,12 +117,52 @@ def get_underlying_instrument_key(symbol):
             (upstox_df['exchange'] == 'NSE_EQ')
         ]
         if not match.empty:
-            return match.iloc[0]['instrument_key']
+            info = match.iloc[0].to_dict()
+            # Extract ISIN from instrument_key (Format: EXCHANGE|ISIN)
+            key = info['instrument_key']
+            info['isin'] = key.split('|')[1] if '|' in key else None
+            return info
     except Exception as e:
-        print(f"Error finding underlying key: {e}")
+        print(f"Error finding underlying info: {e}")
     return None
 
 # API functions
+def fetch_company_profile(isin):
+    """Fetch Company Profile from Upstox API."""
+    url = f"https://api.upstox.com/v2/fundamentals/{isin}/profile"
+    headers = {'Accept': 'application/json', 'Authorization': f'Bearer {get_access_token()}'}
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json().get('data', {})
+    except Exception as e:
+        print(f"Error fetching profile: {e}")
+    return {}
+
+def fetch_shareholdings(isin):
+    """Fetch Shareholding data from Upstox API."""
+    url = f"https://api.upstox.com/v2/fundamentals/{isin}/shareholding"
+    headers = {'Accept': 'application/json', 'Authorization': f'Bearer {get_access_token()}'}
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json().get('data', [])
+    except Exception as e:
+        print(f"Error fetching shareholdings: {e}")
+    return []
+
+def fetch_corporate_actions(isin):
+    """Fetch Corporate actions from Upstox API."""
+    url = f"https://api.upstox.com/v2/fundamentals/{isin}/corporate-actions"
+    headers = {'Accept': 'application/json', 'Authorization': f'Bearer {get_access_token()}'}
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json().get('data', [])
+    except Exception as e:
+        print(f"Error fetching corporate actions: {e}")
+    return []
+
 def fetch_historical_v3(instrument_key, interval='day', interval_value=1, from_date=None, to_date=None):
     """Fetch Historical Candle Data V3."""
     if to_date is None:
@@ -180,27 +220,56 @@ app.layout = dbc.Container([
 
     dbc.Row([
         dbc.Col([
+            dbc.Label("Symbol"),
             dbc.InputGroup([
                 dbc.Button("Prev", id="prev-btn", n_clicks=0),
                 dcc.Dropdown(
                     id='symbol-dropdown',
                     options=[{'label': s, 'value': s} for s in UNIQUE_SYMBOLS],
                     value=UNIQUE_SYMBOLS[0] if UNIQUE_SYMBOLS else None,
-                    style={'width': '200px'}
+                    style={'width': '150px'}
                 ),
                 dbc.Button("Next", id="next-btn", n_clicks=0),
             ])
-        ], width=4),
+        ], width=3),
+        dbc.Col([
+            dbc.Label("Expiry"),
+            dcc.Dropdown(id='expiry-dropdown')
+        ], width=2),
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
-                    html.H5("Max Pain", className="card-title"),
-                    html.Div(id="max-pain-display", style={'fontSize': '24px', 'fontWeight': 'bold'}),
-                    html.Div(id="underlying-price-display")
-                ])
+                    html.H6("Max Pain", className="card-title"),
+                    html.Div(id="max-pain-display", style={'fontSize': '18px', 'fontWeight': 'bold'}),
+                    html.Div(id="underlying-price-display", style={'fontSize': '12px'})
+                ], style={'padding': '10px'})
             ])
-        ], width=4)
-    ], className="mb-4"),
+        ], width=1),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Profile & Sector", className="card-title"),
+                    html.Div(id="profile-display", style={'fontSize': '12px'})
+                ], style={'padding': '10px'})
+            ])
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Shareholding", className="card-title"),
+                    html.Div(id="shareholding-display", style={'fontSize': '12px'})
+                ], style={'padding': '10px'})
+            ])
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Corp Actions", className="card-title"),
+                    html.Div(id="corp-action-display", style={'fontSize': '12px'})
+                ], style={'padding': '10px'})
+            ])
+        ], width=2)
+    ], className="mb-4 align-items-end"),
 
     dbc.Row([
         dbc.Col([
@@ -267,29 +336,103 @@ def navigate_symbols(prev_clicks, next_clicks, current_symbol):
     return current_symbol
 
 @app.callback(
+    [Output('expiry-dropdown', 'options'),
+     Output('expiry-dropdown', 'value'),
+     Output('underlying-info-store', 'data')],
+    [Input('symbol-dropdown', 'value')]
+)
+def update_symbol_expiries(symbol):
+    if not symbol:
+        return [], None, None
+
+    underlying_info = get_underlying_instrument_info(symbol)
+    if not underlying_info:
+        return [], None, None
+
+    # Filter FUTSTK for this symbol
+    futstk_rows = INSTRUMENTS_DF[
+        (INSTRUMENTS_DF['Symbol'] == symbol) &
+        (INSTRUMENTS_DF['instrument_type'] == 'FUTSTK')
+    ]
+
+    if futstk_rows.empty:
+        # Fallback to OPTSTK expiries
+        expiries = sorted(INSTRUMENTS_DF[INSTRUMENTS_DF['Symbol'] == symbol]['expiry'].dropna().unique())
+    else:
+        expiries = sorted(futstk_rows['expiry'].dropna().unique())
+
+    options = [{'label': e, 'value': e} for e in expiries]
+    default_expiry = expiries[0] if expiries else None
+
+    underlying_info['symbol'] = symbol
+
+    return options, default_expiry, underlying_info
+
+@app.callback(
+    [Output('profile-display', 'children'),
+     Output('shareholding-display', 'children'),
+     Output('corp-action-display', 'children')],
+    [Input('underlying-info-store', 'data')]
+)
+def update_fundamentals(info):
+    if not info or not info.get('isin'):
+        return "N/A", "N/A", "N/A"
+
+    isin = info['isin']
+    profile = fetch_company_profile(isin)
+    shares = fetch_shareholdings(isin)
+    actions = fetch_corporate_actions(isin)
+
+    # Profile
+    profile_html = html.Div([
+        html.P(f"Sector: {profile.get('sector', 'N/A')}", style={'fontWeight': 'bold'}),
+        html.P(profile.get('company_profile', 'N/A')[:100] + "...", style={'fontSize': '10px'})
+    ])
+
+    # Shareholding
+    if shares:
+        latest = shares[0] # Assuming first is latest
+        shares_html = html.Div([
+            html.P(f"Q: {latest.get('quarter', 'N/A')}", style={'fontWeight': 'bold'}),
+            html.Ul([
+                html.Li(f"Promoter: {latest.get('promoter', 0)}%"),
+                html.Li(f"FII: {latest.get('fii', 0)}%"),
+                html.Li(f"DII: {latest.get('dii', 0)}%"),
+                html.Li(f"Public: {latest.get('public', 0)}%")
+            ], style={'fontSize': '10px', 'paddingLeft': '15px'})
+        ])
+    else:
+        shares_html = "No data"
+
+    # Corp Actions
+    if actions:
+        latest_act = actions[0]
+        actions_html = html.Div([
+            html.P(f"{latest_act.get('type', 'N/A')}", style={'fontWeight': 'bold'}),
+            html.P(f"Date: {latest_act.get('ex_date', 'N/A')}", style={'fontSize': '10px'}),
+            html.P(f"{latest_act.get('description', 'N/A')}", style={'fontSize': '10px'})
+        ])
+    else:
+        actions_html = "No data"
+
+    return profile_html, shares_html, actions_html
+
+@app.callback(
     [Output('ce-strike-radio', 'options'),
      Output('ce-strike-radio', 'value'),
      Output('pe-strike-radio', 'options'),
      Output('pe-strike-radio', 'value'),
      Output('option-chain-store', 'data'),
-     Output('underlying-info-store', 'data')],
-    [Input('symbol-dropdown', 'value')]
+     Output('underlying-info-store', 'data', allow_duplicate=True)],
+    [Input('expiry-dropdown', 'value')],
+    [State('underlying-info-store', 'data')],
+    prevent_initial_call=True
 )
-def update_symbol_data(symbol):
-    if not symbol:
-        return [], None, [], None, None, None
+def update_option_chain_data(expiry, underlying_info):
+    if not expiry or not underlying_info:
+        return [], None, [], None, None, underlying_info
 
-    underlying_key = get_underlying_instrument_key(symbol)
-    if not underlying_key:
-        return [], None, [], None, None, None
-
-    # Fetch underlying price for nearest expiry
-    # For simplicity, we get the first available expiry for that OPTSTK
-    symbol_options = INSTRUMENTS_DF[INSTRUMENTS_DF['Symbol'] == symbol]
-    if symbol_options.empty:
-        return [], None, [], None, None, None
-
-    expiry = symbol_options['expiry'].min()
+    underlying_key = underlying_info['instrument_key']
     chain_data = fetch_option_chain(underlying_key, expiry)
 
     # Extract strikes
@@ -305,14 +448,13 @@ def update_symbol_data(symbol):
 
     atm_strike = min(strikes, key=lambda x: abs(x - underlying_price)) if strikes else None
 
-    underlying_info = {
-        'key': underlying_key,
+    updated_info = underlying_info.copy()
+    updated_info.update({
         'price': underlying_price,
-        'symbol': symbol,
         'expiry': expiry
-    }
+    })
 
-    return ce_options, atm_strike, pe_options, atm_strike, chain_data, underlying_info
+    return ce_options, atm_strike, pe_options, atm_strike, chain_data, updated_info
 
 @app.callback(
     Output('ce-candle-graph', 'figure'),
@@ -577,11 +719,16 @@ def update_max_pain(chain_data, underlying_info):
 
 @app.callback(
     Output('option-chain-table-container', 'children'),
-    [Input('option-chain-store', 'data')]
+    [Input('option-chain-store', 'data')],
+    [State('underlying-info-store', 'data')]
 )
-def update_table(chain_data):
+def update_table(chain_data, underlying_info):
     if not chain_data:
         return "No data"
+
+    underlying_price = 0
+    if underlying_info:
+        underlying_price = underlying_info.get('price', 0)
 
     rows = []
     for item in chain_data:
@@ -612,44 +759,77 @@ def update_table(chain_data):
             'PE_OI': pe_md.get('oi')
         })
 
-    df = pd.DataFrame(rows).sort_values('Strike')
+    df = pd.DataFrame(rows).sort_values('Strike', ascending=False)
+
+    # Calculate Max OI for highlighting
+    max_ce_oi = df['CE_OI'].max() if not df['CE_OI'].empty else 0
+    max_pe_oi = df['PE_OI'].max() if not df['PE_OI'].empty else 0
+
+    # Find ATM boundary rows for the black border
+    # Since it's sorted High to Low:
+    # Top rows are High strikes (OTM CE / ITM PE)
+    # Bottom rows are Low strikes (ITM CE / OTM PE)
+    # Boundary is where Strike >= price and next Strike < price
+
+    atm_style = []
+    if underlying_price > 0:
+        for i in range(len(df) - 1):
+            s1 = df.iloc[i]['Strike']
+            s2 = df.iloc[i+1]['Strike']
+            if s1 >= underlying_price and s2 < underlying_price:
+                # Add border to bottom of row i
+                atm_style.append({
+                    'if': {'row_index': i},
+                    'borderBottom': '5px solid black'
+                })
+                # Add border to top of row i+1
+                atm_style.append({
+                    'if': {'row_index': i + 1},
+                    'borderTop': '5px solid black'
+                })
+                break
 
     return dash_table.DataTable(
         data=df.to_dict('records'),
         columns=[{'name': i, 'id': i} for i in df.columns],
-        style_cell={'textAlign': 'center'},
+        style_cell={'textAlign': 'center', 'border': '1px solid grey'},
         style_header={'fontWeight': 'bold', 'backgroundColor': 'lightgrey'},
         style_data_conditional=[
+            # Max CE OI Highlight (Light Red)
             {
                 'if': {
-                    'filter_query': '{CE_OI_Chg%} > 0',
-                    'column_id': 'CE_OI_Chg%'
+                    'filter_query': f'{{CE_OI}} = {max_ce_oi}',
+                    'column_id': ['CE_OI', 'CE_OI_Chg%', 'CE_Delta', 'CE_POP', 'CE_LTP']
                 },
+                'backgroundColor': '#FFCCCB'
+            },
+            # Max PE OI Highlight (Light Green)
+            {
+                'if': {
+                    'filter_query': f'{{PE_OI}} = {max_pe_oi}',
+                    'column_id': ['PE_OI', 'PE_OI_Chg%', 'PE_Delta', 'PE_POP', 'PE_LTP']
+                },
+                'backgroundColor': '#90EE90'
+            },
+            # Change % coloring
+            {
+                'if': {'filter_query': '{CE_OI_Chg%} > 0', 'column_id': 'CE_OI_Chg%'},
                 'color': 'green'
             },
             {
-                'if': {
-                    'filter_query': '{CE_OI_Chg%} < 0',
-                    'column_id': 'CE_OI_Chg%'
-                },
+                'if': {'filter_query': '{CE_OI_Chg%} < 0', 'column_id': 'CE_OI_Chg%'},
                 'color': 'red'
             },
             {
-                'if': {
-                    'filter_query': '{PE_OI_Chg%} > 0',
-                    'column_id': 'PE_OI_Chg%'
-                },
+                'if': {'filter_query': '{PE_OI_Chg%} > 0', 'column_id': 'PE_OI_Chg%'},
                 'color': 'green'
             },
             {
-                'if': {
-                    'filter_query': '{PE_OI_Chg%} < 0',
-                    'column_id': 'PE_OI_Chg%'
-                },
+                'if': {'filter_query': '{PE_OI_Chg%} < 0', 'column_id': 'PE_OI_Chg%'},
                 'color': 'red'
             }
-        ],
-        page_size=20
+        ] + atm_style,
+        page_size=100 # Show more rows as requested
     )
 
 if __name__ == "__main__":
