@@ -190,6 +190,27 @@ def fetch_option_chain(underlying_key, expiry):
         print(f"Exception fetching option chain: {e}")
     return []
 
+def fetch_market_quotes(instrument_keys):
+    """Fetch Full Market Quote for multiple instruments."""
+    if not instrument_keys:
+        return {}
+    # Upstox V2 quotes uses comma separated instrument keys
+    keys_str = ",".join(instrument_keys)
+    url = f"https://api.upstox.com/v2/market-quote/quotes?symbol={keys_str}"
+    headers = {
+        'Accept': 'application/json',
+        'Authorization': f'Bearer {get_access_token()}'
+    }
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json().get('data', {})
+        else:
+            print(f"Error fetching market quotes: {response.status_code} {response.text}")
+    except Exception as e:
+        print(f"Exception fetching market quotes: {e}")
+    return {}
+
 # Initialize Data
 INSTRUMENTS_DF = fetch_and_prepare_data()
 UNIQUE_SYMBOLS = sorted(INSTRUMENTS_DF['Symbol'].unique()) if not INSTRUMENTS_DF.empty else []
@@ -271,8 +292,19 @@ app.layout = dbc.Container([
     ], className="mb-4"),
 
     dbc.Row([
-        dbc.Col(dbc.Card([dbc.CardHeader("CE Chart"), dbc.CardBody(dcc.Graph(id='ce-candle-graph'))]), width=6),
-        dbc.Col(dbc.Card([dbc.CardHeader("PE Chart"), dbc.CardBody(dcc.Graph(id='pe-candle-graph'))]), width=6),
+        dbc.Col(dbc.Card([dbc.CardHeader("CE Chart"), dbc.CardBody(dcc.Graph(id='ce-candle-graph'))]), width=4),
+        dbc.Col(dbc.Card([dbc.CardHeader("PE Chart"), dbc.CardBody(dcc.Graph(id='pe-candle-graph'))]), width=4),
+        dbc.Col(dbc.Card([
+            dbc.CardHeader([
+                "Streaming Buy/Sell Qty",
+                dbc.Button("Start Stream", id="start-stream-btn", size="sm", className="ms-2", color="success"),
+                dbc.Button("Stop Stream", id="stop-stream-btn", size="sm", className="ms-2", color="danger"),
+            ], className="d-flex align-items-center"),
+            dbc.CardBody([
+                html.Div(id='streaming-table-container'),
+                dcc.Interval(id='stream-interval', interval=3000, n_intervals=0, disabled=True)
+            ])
+        ]), width=4)
     ], className="mb-4"),
 
     dbc.Row([
@@ -377,8 +409,38 @@ def update_ce_graph(strike, underlying_info):
     expiry = underlying_info['expiry']
     match = INSTRUMENTS_DF[(INSTRUMENTS_DF['Symbol'] == symbol) & (INSTRUMENTS_DF['strike'] == strike) & (INSTRUMENTS_DF['option_type'] == 'CE') & (INSTRUMENTS_DF['expiry'] == expiry)]
     if match.empty: return go.Figure()
-    df = fetch_historical_v3(match.iloc[0]['instrument_key'])
+
+    instrument_key = match.iloc[0]['instrument_key']
+    df = fetch_historical_v3(instrument_key)
+
+    # Append current day data from Full Market Quotes
+    quotes = fetch_market_quotes([instrument_key])
+    if instrument_key in quotes:
+        q = quotes[instrument_key]
+        ohlc = q.get('ohlc', {})
+        new_row = {
+            'timestamp': datetime.now().replace(hour=0, minute=0, second=0, microsecond=0),
+            'open': ohlc.get('open'),
+            'high': ohlc.get('high'),
+            'low': ohlc.get('low'),
+            'close': q.get('last_price'),
+            'volume': q.get('volume'),
+            'oi': q.get('oi')
+        }
+        # Check if today's candle is already in df
+        today_ts = pd.to_datetime(new_row['timestamp'])
+        if not df.empty:
+            if df.iloc[-1]['timestamp'].date() == today_ts.date():
+                # Update last row with latest data
+                for k, v in new_row.items():
+                    df.iloc[-1, df.columns.get_loc(k)] = v
+            else:
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        else:
+            df = pd.DataFrame([new_row])
+
     if df.empty: return go.Figure()
+
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0, row_heights=[0.5, 0.25, 0.25])
     fig.add_trace(go.Candlestick(x=df['timestamp'], open=df['open'], high=df['high'], low=df['low'], close=df['close']), row=1, col=1)
     fig.add_trace(go.Bar(x=df['timestamp'], y=df['volume']), row=2, col=1)
@@ -399,8 +461,36 @@ def update_pe_graph(strike, underlying_info):
     expiry = underlying_info['expiry']
     match = INSTRUMENTS_DF[(INSTRUMENTS_DF['Symbol'] == symbol) & (INSTRUMENTS_DF['strike'] == strike) & (INSTRUMENTS_DF['option_type'] == 'PE') & (INSTRUMENTS_DF['expiry'] == expiry)]
     if match.empty: return go.Figure()
-    df = fetch_historical_v3(match.iloc[0]['instrument_key'])
+
+    instrument_key = match.iloc[0]['instrument_key']
+    df = fetch_historical_v3(instrument_key)
+
+    # Append current day data from Full Market Quotes
+    quotes = fetch_market_quotes([instrument_key])
+    if instrument_key in quotes:
+        q = quotes[instrument_key]
+        ohlc = q.get('ohlc', {})
+        new_row = {
+            'timestamp': datetime.now().replace(hour=0, minute=0, second=0, microsecond=0),
+            'open': ohlc.get('open'),
+            'high': ohlc.get('high'),
+            'low': ohlc.get('low'),
+            'close': q.get('last_price'),
+            'volume': q.get('volume'),
+            'oi': q.get('oi')
+        }
+        today_ts = pd.to_datetime(new_row['timestamp'])
+        if not df.empty:
+            if df.iloc[-1]['timestamp'].date() == today_ts.date():
+                for k, v in new_row.items():
+                    df.iloc[-1, df.columns.get_loc(k)] = v
+            else:
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        else:
+            df = pd.DataFrame([new_row])
+
     if df.empty: return go.Figure()
+
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0, row_heights=[0.5, 0.25, 0.25])
     fig.add_trace(go.Candlestick(x=df['timestamp'], open=df['open'], high=df['high'], low=df['low'], close=df['close']), row=1, col=1)
     fig.add_trace(go.Bar(x=df['timestamp'], y=df['volume']), row=2, col=1)
@@ -417,18 +507,33 @@ def update_pe_graph(strike, underlying_info):
 )
 def update_iv_graph(chain_data, underlying_info):
     if not chain_data or not underlying_info: return go.Figure()
-    price = underlying_info['price']
+    price = underlying_info.get('price', 0)
     iv_data = []
     for item in chain_data:
         strike = item['strike_price']
-        if strike < price * 0.8 or strike > price * 1.2: continue
-        call_iv = item.get('call_options', {}).get('option_greeks', {}).get('iv', 0)
-        put_iv = item.get('put_options', {}).get('option_greeks', {}).get('iv', 0)
-        iv_data.append({'strike': strike, 'call_iv': call_iv if call_iv > 0 else None, 'put_iv': put_iv if put_iv > 0 else None})
+        # Relax OTM filter to see more data
+        if price > 0 and (strike < price * 0.5 or strike > price * 1.5): continue
+
+        call_greeks = item.get('call_options', {}).get('option_greeks')
+        put_greeks = item.get('put_options', {}).get('option_greeks')
+
+        call_iv = call_greeks.get('iv') if call_greeks else 0
+        put_iv = put_greeks.get('iv') if put_greeks else 0
+
+        # Only add if at least one IV is non-zero
+        if (call_iv and call_iv > 0) or (put_iv and put_iv > 0):
+            iv_data.append({
+                'strike': strike,
+                'call_iv': call_iv if (call_iv and call_iv > 0) else None,
+                'put_iv': put_iv if (put_iv and put_iv > 0) else None
+            })
+
+    if not iv_data: return go.Figure(layout={'title': 'No IV data available'})
+
     df = pd.DataFrame(iv_data).sort_values('strike')
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df['strike'], y=df['call_iv'], mode='lines+markers', name='Call IV', line=dict(color='red')))
-    fig.add_trace(go.Scatter(x=df['strike'], y=df['put_iv'], mode='lines+markers', name='Put IV', line=dict(color='green')))
+    fig.add_trace(go.Scatter(x=df['strike'], y=df['call_iv'], mode='lines+markers', name='Call IV', line=dict(color='red'), connectgaps=True))
+    fig.add_trace(go.Scatter(x=df['strike'], y=df['put_iv'], mode='lines+markers', name='Put IV', line=dict(color='green'), connectgaps=True))
     fig.update_layout(title="IV of Put and Call", plot_bgcolor='white', paper_bgcolor='white')
     fig.update_xaxes(showline=True, linewidth=1, linecolor='black', gridcolor='lightgrey')
     fig.update_yaxes(showline=True, linewidth=1, linecolor='black', gridcolor='lightgrey')
@@ -501,6 +606,116 @@ def update_table(chain_data, underlying_info):
                 atm_style = [{'if': {'row_index': i}, 'borderBottom': '5px solid black'}, {'if': {'row_index': i + 1}, 'borderTop': '5px solid black'}]
                 break
     return dash_table.DataTable(data=df.to_dict('records'), columns=[{'name': i, 'id': i} for i in df.columns], style_cell={'textAlign': 'center', 'border': '1px solid grey'}, style_header={'fontWeight': 'bold', 'backgroundColor': 'lightgrey'}, style_data_conditional=[{'if': {'filter_query': f'{{CE_OI}} = {max_ce_oi}', 'column_id': ['CE_OI', 'CE_OI_Chg%', 'CE_Delta', 'CE_POP', 'CE_LTP']}, 'backgroundColor': '#FFCCCB'}, {'if': {'filter_query': f'{{PE_OI}} = {max_pe_oi}', 'column_id': ['PE_OI', 'PE_OI_Chg%', 'PE_Delta', 'PE_POP', 'PE_LTP']}, 'backgroundColor': '#90EE90'}, {'if': {'filter_query': '{CE_OI_Chg%} > 0', 'column_id': 'CE_OI_Chg%'}, 'color': 'green'}, {'if': {'filter_query': '{CE_OI_Chg%} < 0', 'column_id': 'CE_OI_Chg%'}, 'color': 'red'}, {'if': {'filter_query': '{PE_OI_Chg%} > 0', 'column_id': 'PE_OI_Chg%'}, 'color': 'green'}, {'if': {'filter_query': '{PE_OI_Chg%} < 0', 'column_id': 'PE_OI_Chg%'}, 'color': 'red'}] + atm_style, page_size=100)
+
+@app.callback(
+    Output('stream-interval', 'disabled'),
+    [Input('start-stream-btn', 'n_clicks'),
+     Input('stop-stream-btn', 'n_clicks')],
+    [State('stream-interval', 'disabled')],
+    prevent_initial_call=True
+)
+def toggle_streaming(start_clicks, stop_clicks, currently_disabled):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return currently_disabled
+
+    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    if button_id == 'start-stream-btn':
+        return False
+    else:
+        return True
+
+@app.callback(
+    Output('streaming-table-container', 'children'),
+    [Input('stream-interval', 'n_intervals')],
+    [State('option-chain-store', 'data'),
+     State('underlying-info-store', 'data')]
+)
+def update_streaming_data(n, chain_data, underlying_info):
+    if not chain_data or not underlying_info:
+        return "Waiting for data..."
+
+    # Map instrument keys
+    keys_to_fetch = [underlying_info['instrument_key']]
+    strike_map = {} # key -> (strike, type)
+
+    strikes = sorted(list(set([d['strike_price'] for d in chain_data])))
+
+    for item in chain_data:
+        ckey = item.get('call_options', {}).get('instrument_key')
+        pkey = item.get('put_options', {}).get('instrument_key')
+        if ckey:
+            keys_to_fetch.append(ckey)
+            strike_map[ckey] = (item['strike_price'], 'CE')
+        if pkey:
+            keys_to_fetch.append(pkey)
+            strike_map[pkey] = (item['strike_price'], 'PE')
+
+    quotes = fetch_market_quotes(keys_to_fetch)
+
+    # Build table rows
+    stream_rows = []
+
+    # Add Equity row
+    eq_key = underlying_info['instrument_key']
+    if eq_key in quotes:
+        q = quotes[eq_key]
+        stream_rows.append({
+            'Call Buy Qty': q.get('total_buy_quantity'),
+            'Call Sell Qty': q.get('total_sell_quantity'),
+            'Strike': f"EQ: {underlying_info['symbol']}",
+            'Put Buy Qty': '-',
+            'Put Sell Qty': '-'
+        })
+
+    for s in strikes:
+        row = {'Strike': s}
+        # Find keys for this strike
+        ckey = next((k for k, v in strike_map.items() if v[0] == s and v[1] == 'CE'), None)
+        pkey = next((k for k, v in strike_map.items() if v[0] == s and v[1] == 'PE'), None)
+
+        if ckey and ckey in quotes:
+            q = quotes[ckey]
+            row['Call Buy Qty'] = q.get('total_buy_quantity')
+            row['Call Sell Qty'] = q.get('total_sell_quantity')
+        else:
+            row['Call Buy Qty'] = 0
+            row['Call Sell Qty'] = 0
+
+        if pkey and pkey in quotes:
+            q = quotes[pkey]
+            row['Put Buy Qty'] = q.get('total_buy_quantity')
+            row['Put Sell Qty'] = q.get('total_sell_quantity')
+        else:
+            row['Put Buy Qty'] = 0
+            row['Put Sell Qty'] = 0
+
+        stream_rows.append(row)
+
+    # Sort options high to low, keep equity at top
+    options_rows = [r for r in stream_rows if not str(r['Strike']).startswith('EQ:')]
+    eq_rows = [r for r in stream_rows if str(r['Strike']).startswith('EQ:')]
+
+    df_options = pd.DataFrame(options_rows).sort_values('Strike', ascending=False)
+    df_eq = pd.DataFrame(eq_rows)
+
+    df_stream = pd.concat([df_eq, df_options], ignore_index=True)
+
+    return dash_table.DataTable(
+        data=df_stream.to_dict('records'),
+        columns=[
+            {'name': 'Call Buy Qty', 'id': 'Call Buy Qty'},
+            {'name': 'Call Sell Qty', 'id': 'Call Sell Qty'},
+            {'name': 'Strike', 'id': 'Strike'},
+            {'name': 'Put Buy Qty', 'id': 'Put Buy Qty'},
+            {'name': 'Put Sell Qty', 'id': 'Put Sell Qty'}
+        ],
+        style_cell={'textAlign': 'center', 'fontSize': '11px', 'padding': '2px'},
+        style_header={'fontWeight': 'bold', 'backgroundColor': '#f8f9fa'},
+        style_data_conditional=[
+            {'if': {'column_id': 'Strike'}, 'fontWeight': 'bold', 'backgroundColor': '#eee'}
+        ]
+    )
 
 if __name__ == "__main__":
     app.run(debug=True)
