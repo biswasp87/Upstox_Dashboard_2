@@ -70,7 +70,8 @@ def fetch_and_prepare_data():
     if upstox_df.empty:
         return pd.DataFrame()
 
-    instruments_filtered = upstox_df[upstox_df['instrument_type'] == 'OPTSTK'].copy()
+    # Keep both OPTSTK and FUTSTK to follow specific instruction for expiries
+    instruments_filtered = upstox_df[upstox_df['instrument_type'].isin(['OPTSTK', 'FUTSTK'])].copy()
 
     def clean_name(s):
         if not isinstance(s, str): return ""
@@ -191,25 +192,30 @@ def fetch_option_chain(underlying_key, expiry):
     return []
 
 def fetch_market_quotes(instrument_keys):
-    """Fetch Full Market Quote for multiple instruments."""
+    """Fetch Full Market Quote for multiple instruments, chunked by 50 (API limit)."""
     if not instrument_keys:
         return {}
-    # Upstox V2 quotes uses comma separated instrument keys
-    keys_str = ",".join(instrument_keys)
-    url = f"https://api.upstox.com/v2/market-quote/quotes?symbol={keys_str}"
-    headers = {
-        'Accept': 'application/json',
-        'Authorization': f'Bearer {get_access_token()}'
-    }
-    try:
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            return response.json().get('data', {})
-        else:
-            print(f"Error fetching market quotes: {response.status_code} {response.text}")
-    except Exception as e:
-        print(f"Exception fetching market quotes: {e}")
-    return {}
+
+    all_data = {}
+    # Upstox V2 quotes uses comma separated instrument keys, limit 50 per request
+    for i in range(0, len(instrument_keys), 50):
+        chunk = instrument_keys[i:i+50]
+        keys_str = ",".join(chunk)
+        url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={keys_str}"
+        headers = {
+            'Accept': 'application/json',
+            'Authorization': f'Bearer {get_access_token()}'
+        }
+        try:
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                all_data.update(response.json().get('data', {}))
+            else:
+                print(f"Error fetching market quotes chunk: {response.status_code} {response.text}")
+        except Exception as e:
+            print(f"Exception fetching market quotes chunk: {e}")
+
+    return all_data
 
 # Initialize Data
 INSTRUMENTS_DF = fetch_and_prepare_data()
@@ -352,7 +358,12 @@ def update_symbol_expiries(symbol):
     if not symbol: return [], None, None
     underlying_info = get_underlying_instrument_info(symbol)
     if not underlying_info: return [], None, None
-    expiries = sorted(INSTRUMENTS_DF[INSTRUMENTS_DF['Symbol'] == symbol]['expiry'].dropna().unique())
+    # Filter expiries from FUTSTK as per specific instruction
+    expiries = sorted(INSTRUMENTS_DF[(INSTRUMENTS_DF['Symbol'] == symbol) & (INSTRUMENTS_DF['instrument_type'] == 'FUTSTK')]['expiry'].dropna().unique())
+    # Fallback to OPTSTK if FUTSTK expiries not found for some reason
+    if not expiries:
+        expiries = sorted(INSTRUMENTS_DF[(INSTRUMENTS_DF['Symbol'] == symbol) & (INSTRUMENTS_DF['instrument_type'] == 'OPTSTK')]['expiry'].dropna().unique())
+
     options = [{'label': e, 'value': e} for e in expiries]
     default_expiry = expiries[0] if expiries else None
     underlying_info['symbol'] = symbol
@@ -414,9 +425,18 @@ def update_ce_graph(strike, underlying_info):
     df = fetch_historical_v3(instrument_key)
 
     # Append current day data from Full Market Quotes
-    quotes = fetch_market_quotes([instrument_key])
-    if instrument_key in quotes:
-        q = quotes[instrument_key]
+    quotes_data = fetch_market_quotes([instrument_key])
+
+    # Try direct lookup with instrument_key (often the key in V2 is EXCHANGE:SYMBOL)
+    q = quotes_data.get(instrument_key)
+    if not q:
+        # Fallback: find by matching tradingsymbol or token if present
+        for k, v in quotes_data.items():
+            if v.get('instrument_token') == instrument_key or k.endswith(instrument_key.split('|')[-1]):
+                q = v
+                break
+
+    if q:
         ohlc = q.get('ohlc', {})
         new_row = {
             'timestamp': datetime.now().replace(hour=0, minute=0, second=0, microsecond=0),
@@ -430,8 +450,8 @@ def update_ce_graph(strike, underlying_info):
         # Check if today's candle is already in df
         today_ts = pd.to_datetime(new_row['timestamp'])
         if not df.empty:
-            if df.iloc[-1]['timestamp'].date() == today_ts.date():
-                # Update last row with latest data
+            last_ts = pd.to_datetime(df.iloc[-1]['timestamp'])
+            if last_ts.date() == today_ts.date():
                 for k, v in new_row.items():
                     df.iloc[-1, df.columns.get_loc(k)] = v
             else:
@@ -466,9 +486,15 @@ def update_pe_graph(strike, underlying_info):
     df = fetch_historical_v3(instrument_key)
 
     # Append current day data from Full Market Quotes
-    quotes = fetch_market_quotes([instrument_key])
-    if instrument_key in quotes:
-        q = quotes[instrument_key]
+    quotes_data = fetch_market_quotes([instrument_key])
+    q = quotes_data.get(instrument_key)
+    if not q:
+        for k, v in quotes_data.items():
+            if v.get('instrument_token') == instrument_key or k.endswith(instrument_key.split('|')[-1]):
+                q = v
+                break
+
+    if q:
         ohlc = q.get('ohlc', {})
         new_row = {
             'timestamp': datetime.now().replace(hour=0, minute=0, second=0, microsecond=0),
@@ -481,7 +507,8 @@ def update_pe_graph(strike, underlying_info):
         }
         today_ts = pd.to_datetime(new_row['timestamp'])
         if not df.empty:
-            if df.iloc[-1]['timestamp'].date() == today_ts.date():
+            last_ts = pd.to_datetime(df.iloc[-1]['timestamp'])
+            if last_ts.date() == today_ts.date():
                 for k, v in new_row.items():
                     df.iloc[-1, df.columns.get_loc(k)] = v
             else:
@@ -651,15 +678,30 @@ def update_streaming_data(n, chain_data, underlying_info):
             keys_to_fetch.append(pkey)
             strike_map[pkey] = (item['strike_price'], 'PE')
 
-    quotes = fetch_market_quotes(keys_to_fetch)
+    quotes_data = fetch_market_quotes(keys_to_fetch)
+
+    # Build a robust lookup: direct key or matching instrument_token
+    quotes = {}
+    for k, v in quotes_data.items():
+        # Check if the key matches one of our instrument_keys directly (unlikely in V2 but possible in SDKs)
+        # Or if the dictionary key 'k' is like "NSE_EQ:RELIANCE"
+        token = v.get('instrument_token')
+        if token:
+            quotes[token] = v
+        # Also map by the key 'k' itself for direct lookup
+        quotes[k] = v
 
     # Build table rows
     stream_rows = []
 
     # Add Equity row
     eq_key = underlying_info['instrument_key']
-    if eq_key in quotes:
-        q = quotes[eq_key]
+    # Attempt lookup by key, then token
+    q = quotes.get(eq_key)
+    if not q:
+        q = next((v for k, v in quotes_data.items() if v.get('instrument_token') == eq_key), None)
+
+    if q:
         stream_rows.append({
             'Call Buy Qty': q.get('total_buy_quantity'),
             'Call Sell Qty': q.get('total_sell_quantity'),
@@ -674,18 +716,26 @@ def update_streaming_data(n, chain_data, underlying_info):
         ckey = next((k for k, v in strike_map.items() if v[0] == s and v[1] == 'CE'), None)
         pkey = next((k for k, v in strike_map.items() if v[0] == s and v[1] == 'PE'), None)
 
-        if ckey and ckey in quotes:
-            q = quotes[ckey]
-            row['Call Buy Qty'] = q.get('total_buy_quantity')
-            row['Call Sell Qty'] = q.get('total_sell_quantity')
+        # Check Call
+        cq = quotes.get(ckey)
+        if not cq and ckey:
+            cq = next((v for k, v in quotes_data.items() if v.get('instrument_token') == ckey), None)
+
+        if cq:
+            row['Call Buy Qty'] = cq.get('total_buy_quantity', 0)
+            row['Call Sell Qty'] = cq.get('total_sell_quantity', 0)
         else:
             row['Call Buy Qty'] = 0
             row['Call Sell Qty'] = 0
 
-        if pkey and pkey in quotes:
-            q = quotes[pkey]
-            row['Put Buy Qty'] = q.get('total_buy_quantity')
-            row['Put Sell Qty'] = q.get('total_sell_quantity')
+        # Check Put
+        pq = quotes.get(pkey)
+        if not pq and pkey:
+            pq = next((v for k, v in quotes_data.items() if v.get('instrument_token') == pkey), None)
+
+        if pq:
+            row['Put Buy Qty'] = pq.get('total_buy_quantity', 0)
+            row['Put Sell Qty'] = pq.get('total_sell_quantity', 0)
         else:
             row['Put Buy Qty'] = 0
             row['Put Sell Qty'] = 0
