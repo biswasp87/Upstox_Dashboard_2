@@ -706,8 +706,8 @@ def update_streaming_data(n, chain_data, underlying_info):
             'Call Buy Qty': q.get('total_buy_quantity'),
             'Call Sell Qty': q.get('total_sell_quantity'),
             'Strike': f"EQ: {underlying_info['symbol']}",
-            'Put Buy Qty': '-',
-            'Put Sell Qty': '-'
+            'Put Buy Qty': 0,
+            'Put Sell Qty': 0
         })
 
     for s in strikes:
@@ -763,7 +763,21 @@ def update_streaming_data(n, chain_data, underlying_info):
         style_cell={'textAlign': 'center', 'fontSize': '11px', 'padding': '2px'},
         style_header={'fontWeight': 'bold', 'backgroundColor': '#f8f9fa'},
         style_data_conditional=[
-            {'if': {'column_id': 'Strike'}, 'fontWeight': 'bold', 'backgroundColor': '#eee'}
+            {'if': {'column_id': 'Strike'}, 'fontWeight': 'bold', 'backgroundColor': '#eee'},
+            {
+                'if': {
+                    'filter_query': '{Call Buy Qty} > {Call Sell Qty}',
+                    'column_id': 'Call Buy Qty'
+                },
+                'backgroundColor': '#90EE90',
+            },
+            {
+                'if': {
+                    'filter_query': '{Put Buy Qty} > {Put Sell Qty}',
+                    'column_id': 'Put Buy Qty'
+                },
+                'backgroundColor': '#90EE90',
+            }
         ]
     )
 
