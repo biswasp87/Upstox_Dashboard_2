@@ -302,9 +302,14 @@ app.layout = dbc.Container([
         dbc.Col(dbc.Card([dbc.CardHeader("PE Chart"), dbc.CardBody(dcc.Graph(id='pe-candle-graph'))]), width=4),
         dbc.Col(dbc.Card([
             dbc.CardHeader([
-                "Streaming Buy/Sell Qty",
+                html.Span("Streaming Buy/Sell Qty"),
                 dbc.Button("Start Stream", id="start-stream-btn", size="sm", className="ms-2", color="success"),
                 dbc.Button("Start Recording", id="start-recording-btn", size="sm", className="ms-2", color="info"),
+                dbc.InputGroup([
+                    dbc.Button("-", id="interval-dec-btn", size="sm"),
+                    dbc.Input(id="interval-input", type="number", value=3, min=1, step=1, style={'width': '60px', 'textAlign': 'center'}),
+                    dbc.Button("+", id="interval-inc-btn", size="sm"),
+                ], size="sm", className="ms-2", style={'width': 'auto'}),
                 dbc.Button("Stop Stream", id="stop-stream-btn", size="sm", className="ms-2", color="danger"),
             ], className="d-flex align-items-center"),
             dbc.CardBody([
@@ -447,10 +452,17 @@ def update_option_chain_data(expiry, n, start_stream, start_rec, underlying_info
 
 @app.callback(
     Output('ce-candle-graph', 'figure'),
-    [Input('ce-strike-radio', 'value')],
-    [State('underlying-info-store', 'data')]
+    [Input('ce-strike-radio', 'value'), Input('stream-interval', 'n_intervals')],
+    [State('underlying-info-store', 'data'), State('stream-interval', 'disabled')]
 )
-def update_ce_graph(strike, underlying_info):
+def update_ce_graph(strike, n, underlying_info, stream_disabled):
+    ctx = dash.callback_context
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+
+    # If triggered by interval but streaming is disabled, do nothing (prevent redundant full re-fetch)
+    if triggered_id == 'stream-interval' and stream_disabled:
+        raise dash.exceptions.PreventUpdate
+
     if not strike or not underlying_info: return go.Figure()
     symbol = underlying_info['symbol']
     expiry = underlying_info['expiry']
@@ -508,10 +520,16 @@ def update_ce_graph(strike, underlying_info):
 
 @app.callback(
     Output('pe-candle-graph', 'figure'),
-    [Input('pe-strike-radio', 'value')],
-    [State('underlying-info-store', 'data')]
+    [Input('pe-strike-radio', 'value'), Input('stream-interval', 'n_intervals')],
+    [State('underlying-info-store', 'data'), State('stream-interval', 'disabled')]
 )
-def update_pe_graph(strike, underlying_info):
+def update_pe_graph(strike, n, underlying_info, stream_disabled):
+    ctx = dash.callback_context
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+
+    if triggered_id == 'stream-interval' and stream_disabled:
+        raise dash.exceptions.PreventUpdate
+
     if not strike or not underlying_info: return go.Figure()
     symbol = underlying_info['symbol']
     expiry = underlying_info['expiry']
@@ -669,6 +687,26 @@ def update_table(chain_data, underlying_info):
                 atm_style = [{'if': {'row_index': i}, 'borderBottom': '5px solid black'}, {'if': {'row_index': i + 1}, 'borderTop': '5px solid black'}]
                 break
     return dash_table.DataTable(data=df.to_dict('records'), columns=[{'name': i, 'id': i} for i in df.columns], style_cell={'textAlign': 'center', 'border': '1px solid grey'}, style_header={'fontWeight': 'bold', 'backgroundColor': 'lightgrey'}, style_data_conditional=[{'if': {'filter_query': f'{{CE_OI}} = {max_ce_oi}', 'column_id': ['CE_OI', 'CE_OI_Chg%', 'CE_Delta', 'CE_POP', 'CE_LTP']}, 'backgroundColor': '#FFCCCB'}, {'if': {'filter_query': f'{{PE_OI}} = {max_pe_oi}', 'column_id': ['PE_OI', 'PE_OI_Chg%', 'PE_Delta', 'PE_POP', 'PE_LTP']}, 'backgroundColor': '#90EE90'}, {'if': {'filter_query': '{CE_OI_Chg%} > 0', 'column_id': 'CE_OI_Chg%'}, 'color': 'green'}, {'if': {'filter_query': '{CE_OI_Chg%} < 0', 'column_id': 'CE_OI_Chg%'}, 'color': 'red'}, {'if': {'filter_query': '{PE_OI_Chg%} > 0', 'column_id': 'PE_OI_Chg%'}, 'color': 'green'}, {'if': {'filter_query': '{PE_OI_Chg%} < 0', 'column_id': 'PE_OI_Chg%'}, 'color': 'red'}] + atm_style, page_size=100)
+
+@app.callback(
+    [Output('interval-input', 'value'), Output('stream-interval', 'interval')],
+    [Input('interval-inc-btn', 'n_clicks'), Input('interval-dec-btn', 'n_clicks'), Input('interval-input', 'value')],
+    prevent_initial_call=True
+)
+def update_interval_settings(inc, dec, current_val):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return current_val, current_val * 1000
+
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    new_val = current_val if current_val is not None else 3
+
+    if triggered_id == 'interval-inc-btn':
+        new_val += 1
+    elif triggered_id == 'interval-dec-btn':
+        new_val = max(1, new_val - 1)
+
+    return new_val, new_val * 1000
 
 @app.callback(
     [Output('stream-interval', 'disabled'), Output('recording-active-store', 'data')],
