@@ -304,6 +304,7 @@ app.layout = dbc.Container([
             dbc.CardHeader([
                 "Streaming Buy/Sell Qty",
                 dbc.Button("Start Stream", id="start-stream-btn", size="sm", className="ms-2", color="success"),
+                dbc.Button("Start Recording", id="start-recording-btn", size="sm", className="ms-2", color="info"),
                 dbc.Button("Stop Stream", id="stop-stream-btn", size="sm", className="ms-2", color="danger"),
             ], className="d-flex align-items-center"),
             dbc.CardBody([
@@ -325,13 +326,32 @@ app.layout = dbc.Container([
     ], className="mb-4"),
 
     dbc.Row([
+        dbc.Col(dbc.Card([
+            dbc.CardHeader("Trend Strike Selection"),
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([html.Label("CE Strikes"), dcc.Checklist(id='trend-ce-strikes', inline=True, labelStyle={'margin-right': '10px'})], width=6),
+                    dbc.Col([html.Label("PE Strikes"), dcc.Checklist(id='trend-pe-strikes', inline=True, labelStyle={'margin-right': '10px'})], width=6),
+                ])
+            ])
+        ]), width=12)
+    ], className="mb-4"),
+
+    dbc.Row([
+        dbc.Col(dbc.Card([dbc.CardHeader("OI Trend Graph"), dbc.CardBody(dcc.Graph(id='oi-trend-graph'))]), width=6),
+        dbc.Col(dbc.Card([dbc.CardHeader("Buy/Sell Qty Trend Graph"), dbc.CardBody(dcc.Graph(id='buysell-trend-graph'))]), width=6),
+    ], className="mb-4"),
+
+    dbc.Row([
         dbc.Col([
             html.H3("Option Chain Table"),
             html.Div(id='option-chain-table-container')
         ], width=12)
     ]),
     dcc.Store(id='option-chain-store'),
-    dcc.Store(id='underlying-info-store')
+    dcc.Store(id='underlying-info-store'),
+    dcc.Store(id='recording-data-store', data=[]),
+    dcc.Store(id='recording-active-store', data=False)
 ], fluid=True)
 
 # Callbacks
@@ -391,23 +411,39 @@ def update_fundamentals(info):
     return profile_html, shares_html, actions_html
 
 @app.callback(
-    [Output('ce-strike-radio', 'options'), Output('ce-strike-radio', 'value'), Output('pe-strike-radio', 'options'), Output('pe-strike-radio', 'value'), Output('option-chain-store', 'data'), Output('underlying-info-store', 'data', allow_duplicate=True)],
-    [Input('expiry-dropdown', 'value')],
-    [State('underlying-info-store', 'data')],
+    [Output('ce-strike-radio', 'options'), Output('ce-strike-radio', 'value'), Output('pe-strike-radio', 'options'), Output('pe-strike-radio', 'value'), Output('option-chain-store', 'data'), Output('underlying-info-store', 'data', allow_duplicate=True),
+     Output('trend-ce-strikes', 'options'), Output('trend-pe-strikes', 'options')],
+    [Input('expiry-dropdown', 'value'), Input('stream-interval', 'n_intervals'), Input('start-stream-btn', 'n_clicks'), Input('start-recording-btn', 'n_clicks')],
+    [State('underlying-info-store', 'data'), State('stream-interval', 'disabled')],
     prevent_initial_call=True
 )
-def update_option_chain_data(expiry, underlying_info):
-    if not expiry or not underlying_info: return [], None, [], None, None, underlying_info
+def update_option_chain_data(expiry, n, start_stream, start_rec, underlying_info, stream_disabled):
+    ctx = dash.callback_context
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+
+    # If triggered by interval but streaming is disabled, do nothing
+    if triggered_id == 'stream-interval' and stream_disabled:
+        raise dash.exceptions.PreventUpdate
+
+    if not expiry or not underlying_info:
+        return [], None, [], None, None, underlying_info, [], []
+
     underlying_key = underlying_info['instrument_key']
     chain_data = fetch_option_chain(underlying_key, expiry)
     strikes = sorted(list(set([d['strike_price'] for d in chain_data])))
     ce_options = [{'label': str(s), 'value': s} for s in strikes]
     pe_options = [{'label': str(s), 'value': s} for s in strikes]
     underlying_price = chain_data[0].get('underlying_spot_price', 0) if chain_data else 0
-    atm_strike = min(strikes, key=lambda x: abs(x - underlying_price)) if strikes else None
+
+    # Only update default strike if triggered by expiry change
+    if triggered_id == 'expiry-dropdown':
+        atm_strike = min(strikes, key=lambda x: abs(x - underlying_price)) if strikes else None
+    else:
+        atm_strike = dash.no_update
+
     updated_info = underlying_info.copy()
     updated_info.update({'price': underlying_price, 'expiry': expiry})
-    return ce_options, atm_strike, pe_options, atm_strike, chain_data, updated_info
+    return ce_options, atm_strike, pe_options, atm_strike, chain_data, updated_info, ce_options, pe_options
 
 @app.callback(
     Output('ce-candle-graph', 'figure'),
@@ -635,32 +671,45 @@ def update_table(chain_data, underlying_info):
     return dash_table.DataTable(data=df.to_dict('records'), columns=[{'name': i, 'id': i} for i in df.columns], style_cell={'textAlign': 'center', 'border': '1px solid grey'}, style_header={'fontWeight': 'bold', 'backgroundColor': 'lightgrey'}, style_data_conditional=[{'if': {'filter_query': f'{{CE_OI}} = {max_ce_oi}', 'column_id': ['CE_OI', 'CE_OI_Chg%', 'CE_Delta', 'CE_POP', 'CE_LTP']}, 'backgroundColor': '#FFCCCB'}, {'if': {'filter_query': f'{{PE_OI}} = {max_pe_oi}', 'column_id': ['PE_OI', 'PE_OI_Chg%', 'PE_Delta', 'PE_POP', 'PE_LTP']}, 'backgroundColor': '#90EE90'}, {'if': {'filter_query': '{CE_OI_Chg%} > 0', 'column_id': 'CE_OI_Chg%'}, 'color': 'green'}, {'if': {'filter_query': '{CE_OI_Chg%} < 0', 'column_id': 'CE_OI_Chg%'}, 'color': 'red'}, {'if': {'filter_query': '{PE_OI_Chg%} > 0', 'column_id': 'PE_OI_Chg%'}, 'color': 'green'}, {'if': {'filter_query': '{PE_OI_Chg%} < 0', 'column_id': 'PE_OI_Chg%'}, 'color': 'red'}] + atm_style, page_size=100)
 
 @app.callback(
-    Output('stream-interval', 'disabled'),
+    [Output('stream-interval', 'disabled'), Output('recording-active-store', 'data')],
     [Input('start-stream-btn', 'n_clicks'),
+     Input('start-recording-btn', 'n_clicks'),
      Input('stop-stream-btn', 'n_clicks')],
-    [State('stream-interval', 'disabled')],
+    [State('stream-interval', 'disabled'), State('recording-active-store', 'data')],
     prevent_initial_call=True
 )
-def toggle_streaming(start_clicks, stop_clicks, currently_disabled):
+def toggle_streaming(start_clicks, start_rec_clicks, stop_clicks, currently_disabled, currently_recording):
     ctx = dash.callback_context
     if not ctx.triggered:
-        return currently_disabled
+        return currently_disabled, currently_recording
 
     button_id = ctx.triggered[0]['prop_id'].split('.')[0]
     if button_id == 'start-stream-btn':
-        return False
-    else:
-        return True
+        return False, False
+    elif button_id == 'start-recording-btn':
+        return False, True
+    elif button_id == 'stop-stream-btn':
+        return True, False
+    return currently_disabled, currently_recording
 
 @app.callback(
-    Output('streaming-table-container', 'children'),
-    [Input('stream-interval', 'n_intervals')],
+    [Output('streaming-table-container', 'children'), Output('recording-data-store', 'data')],
+    [Input('stream-interval', 'n_intervals'), Input('symbol-dropdown', 'value'), Input('start-stream-btn', 'n_clicks'), Input('start-recording-btn', 'n_clicks')],
     [State('option-chain-store', 'data'),
-     State('underlying-info-store', 'data')]
+     State('underlying-info-store', 'data'),
+     State('recording-active-store', 'data'),
+     State('recording-data-store', 'data')],
+    prevent_initial_call=True
 )
-def update_streaming_data(n, chain_data, underlying_info):
+def update_streaming_data(n, symbol_val, start_stream, start_rec, chain_data, underlying_info, recording_active, recorded_history):
+    ctx = dash.callback_context
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+
+    if triggered_id == 'symbol-dropdown':
+        return "Streaming reset.", []
+
     if not chain_data or not underlying_info:
-        return "Waiting for data..."
+        return "Waiting for data...", recorded_history
 
     # Map instrument keys
     keys_to_fetch = [underlying_info['instrument_key']]
@@ -751,7 +800,26 @@ def update_streaming_data(n, chain_data, underlying_info):
 
     df_stream = pd.concat([df_eq, df_options], ignore_index=True)
 
-    return dash_table.DataTable(
+    # Handle Recording
+    new_history = recorded_history
+    if recording_active:
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        snapshot = []
+        for row in stream_rows:
+            snapshot.append({
+                'timestamp': timestamp,
+                'Strike': row['Strike'],
+                'Call Buy Qty': row.get('Call Buy Qty', 0),
+                'Call Sell Qty': row.get('Call Sell Qty', 0),
+                'Put Buy Qty': row.get('Put Buy Qty', 0),
+                'Put Sell Qty': row.get('Put Sell Qty', 0),
+                # We need OI as well for the trend graph
+                'Call OI': next((item.get('call_options', {}).get('market_data', {}).get('oi', 0) for item in chain_data if item['strike_price'] == row['Strike']), 0) if isinstance(row['Strike'], (int, float)) else 0,
+                'Put OI': next((item.get('put_options', {}).get('market_data', {}).get('oi', 0) for item in chain_data if item['strike_price'] == row['Strike']), 0) if isinstance(row['Strike'], (int, float)) else 0,
+            })
+        new_history.append(snapshot)
+
+    table = dash_table.DataTable(
         data=df_stream.to_dict('records'),
         columns=[
             {'name': 'Call Buy Qty', 'id': 'Call Buy Qty'},
@@ -780,6 +848,79 @@ def update_streaming_data(n, chain_data, underlying_info):
             }
         ]
     )
+    return table, new_history
+
+@app.callback(
+    Output('oi-trend-graph', 'figure'),
+    [Input('recording-data-store', 'data'),
+     Input('trend-ce-strikes', 'value'),
+     Input('trend-pe-strikes', 'value')]
+)
+def update_oi_trend(history, ce_strikes, pe_strikes):
+    if not history or (not ce_strikes and not pe_strikes):
+        return go.Figure(layout={'title': 'Waiting for recorded data and strike selection...'})
+
+    # history is a list of snapshots (list of dicts)
+    # Convert to a format easy for plotting
+    data_list = []
+    for snapshot in history:
+        for row in snapshot:
+            data_list.append(row)
+    df = pd.DataFrame(data_list)
+
+    fig = go.Figure()
+    if ce_strikes:
+        for s in ce_strikes:
+            df_s = df[df['Strike'] == s]
+            if not df_s.empty:
+                fig.add_trace(go.Scatter(x=df_s['timestamp'], y=df_s['Call OI'], mode='lines+markers', name=f'CE {s} OI'))
+
+    if pe_strikes:
+        for s in pe_strikes:
+            df_s = df[df['Strike'] == s]
+            if not df_s.empty:
+                fig.add_trace(go.Scatter(x=df_s['timestamp'], y=df_s['Put OI'], mode='lines+markers', name=f'PE {s} OI'))
+
+    fig.update_layout(title="OI Trend (Recorded)", plot_bgcolor='white', paper_bgcolor='white', xaxis_title="Time", yaxis_title="OI")
+    fig.update_xaxes(showline=True, linewidth=1, linecolor='black', gridcolor='lightgrey')
+    fig.update_yaxes(showline=True, linewidth=1, linecolor='black', gridcolor='lightgrey')
+    return fig
+
+@app.callback(
+    Output('buysell-trend-graph', 'figure'),
+    [Input('recording-data-store', 'data'),
+     Input('trend-ce-strikes', 'value'),
+     Input('trend-pe-strikes', 'value')]
+)
+def update_buysell_trend(history, ce_strikes, pe_strikes):
+    if not history or (not ce_strikes and not pe_strikes):
+        return go.Figure(layout={'title': 'Waiting for recorded data and strike selection...'})
+
+    data_list = []
+    for snapshot in history:
+        for row in snapshot:
+            data_list.append(row)
+    df = pd.DataFrame(data_list)
+
+    fig = go.Figure()
+    if ce_strikes:
+        for s in ce_strikes:
+            df_s = df[df['Strike'] == s]
+            if not df_s.empty:
+                fig.add_trace(go.Scatter(x=df_s['timestamp'], y=df_s['Call Buy Qty'], mode='lines', name=f'CE {s} Buy Qty', line=dict(dash='solid')))
+                fig.add_trace(go.Scatter(x=df_s['timestamp'], y=df_s['Call Sell Qty'], mode='lines', name=f'CE {s} Sell Qty', line=dict(dash='dot')))
+
+    if pe_strikes:
+        for s in pe_strikes:
+            df_s = df[df['Strike'] == s]
+            if not df_s.empty:
+                fig.add_trace(go.Scatter(x=df_s['timestamp'], y=df_s['Put Buy Qty'], mode='lines', name=f'PE {s} Buy Qty', line=dict(dash='solid')))
+                fig.add_trace(go.Scatter(x=df_s['timestamp'], y=df_s['Put Sell Qty'], mode='lines', name=f'PE {s} Sell Qty', line=dict(dash='dot')))
+
+    fig.update_layout(title="Buy/Sell Qty Trend (Recorded)", plot_bgcolor='white', paper_bgcolor='white', xaxis_title="Time", yaxis_title="Qty")
+    fig.update_xaxes(showline=True, linewidth=1, linecolor='black', gridcolor='lightgrey')
+    fig.update_yaxes(showline=True, linewidth=1, linecolor='black', gridcolor='lightgrey')
+    return fig
 
 if __name__ == "__main__":
     app.run(debug=True)
